@@ -1,6 +1,7 @@
 package reader
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -76,6 +77,33 @@ func (s *Service) validate() error {
 	}
 
 	return nil
+}
+
+// Get returns a sales record by its transaction signature id
+func (s *Service) Get(id string) (*sales.Record, error) {
+	logger := s.logger.With(zap.String("saledId", id))
+
+	opts := gocb.GetOptions{
+		Timeout: cbTimeout,
+	}
+	result, err := s.collection.Get(id, &opts)
+	if err != nil {
+		if errors.Is(err, gocb.ErrDocumentNotFound) {
+			return nil, sales.ErrNotFound
+		}
+		const msg = "unable to get record"
+		logger.Error(msg, zap.Error(err))
+		return nil, fmt.Errorf(msg+": %w", err)
+	}
+
+	var rec sales.Record
+	if err := result.Content(&rec); err != nil {
+		const msg = "unable to unmarshal content into sales.Record"
+		logger.Error(msg, zap.Error(err))
+		return nil, fmt.Errorf(msg+": %w", err)
+	}
+
+	return &rec, nil
 }
 
 func (s *Service) List(wheres ...*Where) ([]sales.Record, error) {

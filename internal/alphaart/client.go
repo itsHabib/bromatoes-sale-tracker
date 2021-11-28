@@ -16,7 +16,7 @@ import (
 const (
 	badBromotoesCollectionID = "bad-bromatoes"
 
-	httpTimeout = time.Second * 3
+	httpTimeout = time.Second * 60
 
 	// APIURL is the url of the alpha art api
 	APIURL = "https://apis.alpha.art"
@@ -69,6 +69,7 @@ func NewClient(logger *zap.Logger) (*Client, error) {
 
 // GetActivityHistory returns the Alpha Art activity history for a given
 // collection id using the provided params.
+// TODO: dont need this query param type
 func (c *Client) GetActivityHistory(collectionID string, params *QueryParam) (*ActivityHistory, error) {
 	logger := c.logger.With(zap.String("collectionId", collectionID))
 

@@ -1,0 +1,10 @@
+version: "3.8"
+services:
+  couchbase:
+    image: couchbase/server:7.0.2
+    build:
+      context: ./docker/couchbase
+    ports:
+      - "8091-8094:8091-8094"
+      - "9102:9102"
+      - "11210:11210"
