@@ -5,6 +5,7 @@ import (
 )
 
 const (
+
 	// Sale communicates that the activity was a sale
 	Sale TradingType = "SALE"
 
@@ -16,15 +17,7 @@ const (
 
 	// Collection is the default resource collection for an alpha art activity
 	// request payload. I still have yet to see another type
-	Collection  ResourceType = "COLLECTION"
-
-	// APIURL is the url of the alpha art api
-	APIURL = "https://apis.alpha.art"
-
-	// ActivityAPIURL is the url of the activity resource in the alpha
-	// art api
-	ActivityAPIURL = APIURL + "/api/v1/activity"
-
+	Collection ResourceType = "COLLECTION"
 )
 
 // ActivityHistory represents the response type given by AlphaArts activity
@@ -37,7 +30,7 @@ type ActivityHistory struct {
 // Activity represents the singular activity record that Alpha Art
 // returns in their API. Please note
 type Activity struct {
-	// Signature is the sig of the transaction:w
+	// Signature is the sig of the transaction
 	Signature string `json:"signature"`
 
 	// MintPubkey is the public key of the mint account
@@ -66,6 +59,7 @@ type Activity struct {
 // TradingType communicates the type of activity, can be one of SALE, LISTING,
 // or OFFER
 type TradingType string
+
 func (t TradingType) String() string { return string(t) }
 
 // ResourceType is the type of resource the activity is for. I have not seen

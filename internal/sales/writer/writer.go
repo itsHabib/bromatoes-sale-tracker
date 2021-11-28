@@ -1,6 +1,7 @@
-package reader
+package writer
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,27 +16,27 @@ const (
 	cbTimeout = time.Second * 3
 )
 
-// Service is responsible for performing read operations on the nfts.sales
+// Service is responsible for performing write operations on the nfts.sales
 // collection. We use a separate reader service to avoid commingling read/writes
 type Service struct {
-	bucket string
-	cluster *gocb.Cluster
+	bucket     string
+	cluster    *gocb.Cluster
 	collection *gocb.Collection
-	logger *zap.Logger
+	logger     *zap.Logger
 }
 
 func NewService(logger *zap.Logger, cluster *gocb.Cluster, bucket string) (*Service, error) {
 	s := Service{
-		bucket: bucket,
+		bucket:  bucket,
 		cluster: cluster,
-		logger: logger,
+		logger:  logger,
 	}
 
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
 
-	if err := s.setCollection(); err != nil{
+	if err := s.setCollection(); err != nil {
 		return nil, fmt.Errorf("unable to set collection: %w", err)
 	}
 
@@ -45,10 +46,10 @@ func NewService(logger *zap.Logger, cluster *gocb.Cluster, bucket string) (*Serv
 func (s *Service) validate() error {
 	var missingDeps []string
 
-	for _, tc := range []struct{
+	for _, tc := range []struct {
 		dep string
 		chk func() bool
-	} {
+	}{
 		{
 			dep: "logger",
 			chk: func() bool { return s.logger != nil },
@@ -78,55 +79,30 @@ func (s *Service) validate() error {
 	return nil
 }
 
-
-func (s *Service) List(wheres ...*Where) ([]sales.Record, error) {
-	options := gocb.QueryOptions{
-		ScanConsistency:      gocb.QueryScanConsistencyRequestPlus,
-		Timeout:              cbTimeout,
+// Create the sales record
+func (s *Service) Create(record *sales.Record) error {
+	if record == nil {
+		const msg = "unable to create record: record is nil"
+		s.logger.Error(msg)
+		return errors.New(msg)
 	}
 
-	fqn := s.fullyQualifiedCollectionName()
-	stmt := "SELECT * FROM " + fqn
+	logger := s.logger.With(zap.String("salesId", record.ID))
 
-	// add where clauses to statement
-	if len(wheres) > 0 {
-		params := make(map[string]interface{}, len(wheres))
-
-		stmt += " WHERE " + escapeField(wheres[0].Field) + " " + wheres[0].Operator + namedParamField(wheres[0].Field)
-		params[namedParamField(wheres[0].Field)] = wheres[0].Value
-
-		wheres := wheres[1:]
-		for i := range wheres {
-			n := namedParamField(wheres[i].Field)
-			stmt += " AND " + escapeField(wheres[i].Field) + " " + wheres[i].Operator + n
-			params[n] = wheres[i].Value
-		}
-		options.NamedParameters = params
+	opts := gocb.InsertOptions{
+		DurabilityLevel: gocb.DurabilityLevelNone,
+		Timeout:         cbTimeout,
 	}
-
-	res, err := s.cluster.Query(stmt, &options)
+	_, err := s.collection.Insert(record.ID, record, &opts)
 	if err != nil {
-		const msg = "unable to query collection"
-		s.logger.Error(msg, zap.Error(err))
-		return nil, fmt.Errorf(msg +": %w", err)
+		const msg = "unable to create sales record"
+		logger.Error(msg, zap.Error(err))
+		return fmt.Errorf(msg+": %w", err)
 	}
 
-	var records []sales.Record
-	for res.Next() {
-		var rec sales.Record
-		if err := res.Row(&rec); err != nil {
-			const msg = "unable to unmarshal record"
-			s.logger.Error(msg, zap.Error(err))
-			return nil, fmt.Errorf(msg +": %w", err)
-		}
-		records = append(records, rec)
-	}
+	logger.Debug("successfully created sales record")
 
-	if len(records) == 0 {
-		return nil, sales.ErrNotFound
-	}
-
-	return records, nil
+	return nil
 }
 
 func (s *Service) setCollection() error {
@@ -138,22 +114,4 @@ func (s *Service) setCollection() error {
 	s.collection = bucket.Scope(sales.CouchbaseScope).Collection(sales.CouchbaseCollection)
 
 	return nil
-}
-
-func (s *Service) fullyQualifiedCollectionName() string {
-	return "`" + s.bucket + "`" + "." + sales.CouchbaseScope + "." + sales.CouchbaseCollection
-}
-
-type Where struct {
-	Field string
-	Value interface{}
-	Operator string
-}
-
-func escapeField(field string) string {
-	return "`" + strings.Replace(field, ".", "`.`", -1) + "`"
-}
-
-func namedParamField(field string) string {
-	return "$" + strings.Replace(field, ".", "_", -1)
 }

@@ -20,7 +20,7 @@ import (
      "toPubkey": "Fakzu1tWjyqErcgPfjHGQD7h77tFRtaKknFm9wqF8D73",
      "marketplace": "alpha.art"
    }
- */
+*/
 
 const (
 	// Sale communicates that the activity was a sale
@@ -34,7 +34,7 @@ const (
 
 	// Collection is the default resource collection for an alpha art activity
 	// request payload. I still have yet to see another type
-	Collection  ResourceType = "COLLECTION"
+	Collection ResourceType = "COLLECTION"
 
 	// AlphaArtAPIURL is the url of the alpha art api
 	AlphaArtAPIURL = "https://apis.alpha.art"
@@ -79,6 +79,7 @@ type AlphaArtActivity struct {
 type AlphaArtActivityHistory struct {
 	Activities []AlphaArtActivity `json:"history"`
 }
+
 /*
 {
 	"id":"bad-bromatoes",
@@ -88,7 +89,7 @@ type AlphaArtActivityHistory struct {
 	"limit":20,
 	"noForeignListing":true,
 }
- */
+*/
 
 // AlphaArtActivityPayload represents the payload needed to query AlphaArts
 // activity endpoint. Please note this is not documented and this was only
@@ -132,7 +133,7 @@ func main() {
 	payload := AlphaArtActivityPayload{
 		ID:               BadBromotoesAlphaArtCollectionID,
 		ResourceType:     Collection,
-		TradingTypes:    []AlphaTradingType{Sale},
+		TradingTypes:     []AlphaTradingType{Sale},
 		Limit:            20,
 		NoForeignListing: true,
 	}
@@ -148,7 +149,7 @@ func main() {
 	}
 	log.Printf("url: %s", req.URL.String())
 
-	resp,  err := c.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		log.Fatalf("unable to get activity: %s", err)
 

@@ -15,11 +15,11 @@ import (
 func Test_Client_GetActivityHistory(t *testing.T) {
 	before := time.Date(2021, 11, 26, 0, 0, 0, 0, time.UTC)
 
-	for _, tc := range []struct{
-		desc string
+	for _, tc := range []struct {
+		desc   string
 		params *QueryParam
-		chk func(t *testing.T, history *ActivityHistory)
-	} {
+		chk    func(t *testing.T, history *ActivityHistory)
+	}{
 		{
 			desc: "Happy path - default params",
 			chk: func(t *testing.T, history *ActivityHistory) {
@@ -57,7 +57,7 @@ func Test_Client_GetActivityHistory(t *testing.T) {
 			params: &QueryParam{
 				TradingTypes: []TradingType{Sale, Listing, Offer},
 				Before:       &before,
-				Limit: 3,
+				Limit:        3,
 			},
 			chk: func(t *testing.T, history *ActivityHistory) {
 				require.NotNil(t, history)
@@ -68,7 +68,7 @@ func Test_Client_GetActivityHistory(t *testing.T) {
 				}
 			},
 		},
-	}{
+	} {
 		{
 			t.Run(tc.desc, func(t *testing.T) {
 				c, err := NewClient(zap.NewNop())

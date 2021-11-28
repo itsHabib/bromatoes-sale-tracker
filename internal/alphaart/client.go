@@ -15,14 +15,22 @@ import (
 
 const (
 	badBromotoesCollectionID = "bad-bromatoes"
+
 	httpTimeout = time.Second * 3
+
+	// APIURL is the url of the alpha art api
+	APIURL = "https://apis.alpha.art"
+
+	// ActivityAPIURL is the url of the activity resource in the alpha
+	// art api
+	ActivityAPIURL = APIURL + "/api/v1/activity"
 )
 
 // Client is responsible for interacting with the Alpha Art api to retrieve
 // a list of activity for a certain collection id.
 type Client struct {
 	logger *zap.Logger
-	c *http.Client
+	c      *http.Client
 }
 
 // NewClient returns an instantiated instance of a new aa client. The client
@@ -55,7 +63,7 @@ func NewClient(logger *zap.Logger) (*Client, error) {
 
 	return &Client{
 		logger: logger,
-		c: &http.Client{Timeout:  httpTimeout},
+		c:      &http.Client{Timeout: httpTimeout},
 	}, nil
 }
 
@@ -89,7 +97,7 @@ func (c *Client) GetActivityHistory(collectionID string, params *QueryParam) (*A
 		return nil, fmt.Errorf(msg+": %w", err)
 	}
 
-	resp,  err := c.c.Do(req)
+	resp, err := c.c.Do(req)
 	if err != nil {
 		const msg = "unable to get activity"
 		logger.Error(msg, zap.Error(err))
@@ -108,7 +116,6 @@ func (c *Client) GetActivityHistory(collectionID string, params *QueryParam) (*A
 	}
 	resp.Body.Close()
 
-
 	return &history, nil
 }
 
@@ -117,9 +124,9 @@ func (c *Client) GetActivityHistory(collectionID string, params *QueryParam) (*A
 // are a limit of 20, all trading types of Listing, Sale, and Offer, and
 // and a nil before time.
 type QueryParam struct {
-	Limit int
+	Limit        int
 	TradingTypes []TradingType
-	Before *time.Time
+	Before       *time.Time
 }
 
 func (q *QueryParam) toActivityHistoryPayload(collectionID string) activityHistoryPayload {
@@ -142,10 +149,10 @@ func (q *QueryParam) validateTradingTypes() error {
 		return fmt.Errorf("can not have more than three trading types")
 	}
 
-	validTradingTypes := map[TradingType]struct{} {
-		Sale: {},
+	validTradingTypes := map[TradingType]struct{}{
+		Sale:    {},
 		Listing: {},
-		Offer: {},
+		Offer:   {},
 	}
 
 	var unsupportedTypes []string
@@ -198,9 +205,9 @@ type activityHistoryPayload struct {
 	NoForeignListing bool `json:"NoForeignListing"`
 }
 
-func defaultQueryParam() *QueryParam{
+func defaultQueryParam() *QueryParam {
 	return &QueryParam{
-		Limit: 20,
+		Limit:        20,
 		TradingTypes: []TradingType{Sale, Listing, Offer},
 	}
 }
@@ -210,7 +217,7 @@ func defaultQueryParam() *QueryParam{
 func configureParams(params *QueryParam) error {
 	if params == nil {
 		params = defaultQueryParam()
-		return  nil
+		return nil
 	}
 
 	if err := params.validateTradingTypes(); err != nil {
