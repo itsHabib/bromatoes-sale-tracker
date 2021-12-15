@@ -3,6 +3,7 @@ package reader
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,31 +107,50 @@ func (s *Service) Get(id string) (*sales.Record, error) {
 	return &rec, nil
 }
 
-func (s *Service) List(wheres ...*Where) ([]sales.Record, error) {
+func (s *Service) List(condition Condition) ([]sales.Record, error) {
 	options := gocb.QueryOptions{
 		ScanConsistency: gocb.QueryScanConsistencyRequestPlus,
 		Timeout:         cbTimeout,
 	}
 
-	fqn := s.fullyQualifiedCollectionName()
-	stmt := "SELECT * FROM " + fqn
+	fqn := sales.FullyQualifiedCollectionName(s.bucket)
+	stmt := "SELECT x.* FROM " + fqn + " x"
 
 	// add where clauses to statement
-	if len(wheres) > 0 {
-		params := make(map[string]interface{}, len(wheres))
+	if len(condition.Wheres) > 0 {
+		params := make(map[string]interface{}, len(condition.Wheres))
 
-		stmt += " WHERE " + escapeField(wheres[0].Field) + " " + wheres[0].Operator + namedParamField(wheres[0].Field)
-		params[namedParamField(wheres[0].Field)] = wheres[0].Value
+		stmt += " WHERE " + escapeField(condition.Wheres[0].Field) + " " + condition.Wheres[0].Operator
+		if condition.Wheres[0].Operator != "IS NULL" && condition.Wheres[0].Operator != "IS NOT NULL" {
+			stmt += " " + namedParamField(condition.Wheres[0].Field)
+		}
 
-		wheres := wheres[1:]
+		params[namedParamField(condition.Wheres[0].Field)] = condition.Wheres[0].Value
+
+		wheres := condition.Wheres[1:]
 		for i := range wheres {
 			n := namedParamField(wheres[i].Field)
-			stmt += " AND " + escapeField(wheres[i].Field) + " " + wheres[i].Operator + n
+			stmt += " AND " + escapeField(wheres[i].Field) + " " + wheres[i].Operator
+			if wheres[i].Operator != "IS NULL" && wheres[i].Operator != "IS NOT NULL" {
+				stmt += " " + n
+			}
 			params[n] = wheres[i].Value
 		}
 		options.NamedParameters = params
 	}
 
+	if condition.OrderBy != "" {
+		stmt += " ORDER BY " + escapeField(condition.OrderBy)
+		if condition.SortDirection != "" {
+			stmt += " " + condition.SortDirection
+		}
+	}
+
+	if condition.Limit > 0 {
+		stmt += " LIMIT " + strconv.Itoa(condition.Limit)
+	}
+
+	s.logger.Debug("query statement", zap.String("statement", stmt), zap.Any("params", options.NamedParameters))
 	res, err := s.cluster.Query(stmt, &options)
 	if err != nil {
 		const msg = "unable to query collection"
@@ -167,8 +187,11 @@ func (s *Service) setCollection() error {
 	return nil
 }
 
-func (s *Service) fullyQualifiedCollectionName() string {
-	return "`" + s.bucket + "`" + "." + sales.CouchbaseScope + "." + sales.CouchbaseCollection
+type Condition struct {
+	Wheres        []Where
+	OrderBy       string
+	SortDirection string
+	Limit         int
 }
 
 type Where struct {

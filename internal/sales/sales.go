@@ -10,18 +10,7 @@ const (
 	// are stored
 	CouchbaseCollection = "sales"
 
-	// AlphaArt represents the Alpha Art marketplace
-	AlphaArt Marketplace = "alpha-art"
-
-	// MagicEden represents the Alpha Art marketplace
-	MagicEden Marketplace = "magic-eden"
-
-	// DigitalEyes represents the Digital Eyes marketplace
-	DigitalEyes Marketplace = "digital-eyes"
-
 	Twitter PublishChannel = "twitter"
-
-	Discord PublishChannel = "discord"
 )
 
 // Record represents the sales record of the NFT
@@ -40,11 +29,8 @@ type Record struct {
 	//confused with the SaleTime which is the time of sale.
 	CreatedAt *time.Time `json:"createdAt"`
 
-	// ImageURI is the uri of the nft image
-	ImageURI string `json:"imageUri"`
-
 	// Marketplace is the marketplace where the sale took place
-	Marketplace Marketplace `json:"marketplace"`
+	Marketplace string `json:"marketplace"`
 
 	// MintPubkey is the public key of the mint account
 	MintPubkey string `json:"mintPubkey"`
@@ -52,20 +38,37 @@ type Record struct {
 	// Price of the sale, in lamports
 	Price uint64 `json:"price"`
 
-	// PublishDetails communicates the details of the posting to different
-	// social media channels. e.g. twitter, discord
-	PublishDetails []PublishDetails `json:"publishDetails"`
+	// PublishDetails communicates the details of the posting to twitter
+	PublishDetails *PublishDetails `json:"publishDetails"`
 
 	// Seller is the pubkey address of the seller of the nft
 	Seller string `json:"seller"`
 
 	// SaleTime is the time in which the sale occurred
 	SaleTime *time.Time `json:"saleTime"`
+
+	NFT NFT `json:"nft"`
+
+	// TwitterMediaID represents the media id of the bromato PNG file.
+	// This is needed to have the picture of the bromato in the tweet.
+	TwitterMediaID string `json:"twitterMediaId"`
 }
 
+// NFT represents an NFT's metadata
+type NFT struct {
+	Name        string `json:"name"`
+	Symbol      string `json:"symbol"`
+	MetadataURI string `json:"metadataURI"`
+}
+
+// PublishDetails is the object that holds the information regarding the
+// publishing of the sales to a certain social media platform. At the moment
+// only twitter is allowed.
 type PublishDetails struct {
+	ID      string         `json:"id"`
 	Channel PublishChannel `json:"channel"`
 	Time    *time.Time     `json:"time"`
+	Success bool           `json:"success"`
 }
 
 type PublishChannel string
@@ -75,3 +78,7 @@ type Marketplace string
 func (m Marketplace) String() string { return string(m) }
 
 type NFTCollection string
+
+func FullyQualifiedCollectionName(bucket string) string {
+	return "`" + bucket + "`" + "." + CouchbaseScope + "." + CouchbaseCollection
+}

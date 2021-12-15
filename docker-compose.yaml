@@ -4,7 +4,11 @@ services:
     image: couchbase/server:7.0.2
     build:
       context: ./docker/couchbase
+    volumes:
+      - couchbase-data:/opt/couchbase/var
     ports:
       - "8091-8094:8091-8094"
       - "9102:9102"
       - "11210:11210"
+volumes:
+  couchbase-data:

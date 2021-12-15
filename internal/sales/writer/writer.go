@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	cbTimeout = time.Second * 3
+	cbTimeout = time.Second * 5
 )
 
 // Service is responsible for performing write operations on the nfts.sales
@@ -105,6 +105,61 @@ func (s *Service) Create(record *sales.Record) error {
 	return nil
 }
 
+type Update struct {
+	Field string
+	Value interface{}
+}
+
+// UpdateFields updates the sales record specific fields
+func (s *Service) UpdateFields(id string, updates ...Update) error {
+	if len(updates) == 0 {
+		return nil
+	}
+
+	logger := s.logger.With(zap.String("salesId", id))
+
+	fqn := sales.FullyQualifiedCollectionName(s.bucket)
+	stmt := "UPDATE " + fqn
+
+	namedParams := make(map[string]interface{})
+	if len(updates) > 0 {
+		np := namedParamField(updates[0].Field)
+		stmt += " SET " + escapeField(updates[0].Field) + " = " + np
+		namedParams[np] = updates[0].Value
+		updates = updates[1:]
+
+		for i := range updates {
+			np := namedParamField(updates[i].Field)
+			stmt += "," + escapeField(updates[i].Field) + " = " + np
+			namedParams[np] = updates[i].Value
+		}
+	}
+
+	stmt += " WHERE id = $q_id LIMIT 1"
+	namedParams[namedParamField("id")] = id
+
+	logger.Debug(
+		"query statement",
+		zap.String("statement", stmt),
+		zap.Any("params", namedParams),
+	)
+	opts := gocb.QueryOptions{
+		Timeout:         cbTimeout,
+		NamedParameters: namedParams,
+		ScanConsistency: gocb.QueryScanConsistencyRequestPlus,
+	}
+	_, err := s.cluster.Query(stmt, &opts)
+	if err != nil {
+		const msg = "unable to create sales record"
+		logger.Error(msg, zap.Error(err))
+		return fmt.Errorf(msg+": %w", err)
+	}
+
+	logger.Debug("successfully created sales record")
+
+	return nil
+}
+
 func (s *Service) setCollection() error {
 	bucket := s.cluster.Bucket(s.bucket)
 	if err := bucket.WaitUntilReady(cbTimeout, nil); err != nil {
@@ -114,4 +169,12 @@ func (s *Service) setCollection() error {
 	s.collection = bucket.Scope(sales.CouchbaseScope).Collection(sales.CouchbaseCollection)
 
 	return nil
+}
+
+func escapeField(field string) string {
+	return "`" + strings.Replace(field, ".", "`.`", -1) + "`"
+}
+
+func namedParamField(field string) string {
+	return "$q_" + strings.Replace(field, ".", "_", -1)
 }
