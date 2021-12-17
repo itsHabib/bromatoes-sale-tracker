@@ -282,6 +282,12 @@ findNewSales:
 			//sale.Buyer = findBuyer(keys, tx.Meta, m)
 			//sale.Seller = findSeller(keys, tx.Meta, m)
 
+			// if the price is < .09 sol and the marketplace is solsea,
+			// its prob not a sale and just something else.
+			if sale.Price < 90000000 && sale.Marketplace == "Solsea" {
+				continue
+			}
+
 			// we found a new sale
 			logger.Debug("new sale found", zap.String("salesId", sale.ID), zap.Int("numNewSales", newSales), zap.Time("saleTime", saleTime))
 			if _, err := s.Create(sale); err != nil {
