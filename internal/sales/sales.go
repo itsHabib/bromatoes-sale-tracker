@@ -20,6 +20,7 @@ type Record struct {
 	ID string `json:"id"`
 
 	// Buyer is the buyer's pub key address of the nft
+	// DEPRECATED
 	Buyer string `json:"buyer"`
 
 	// Collection communicates the NFT collection e.g. bad-bromatoes
@@ -42,6 +43,7 @@ type Record struct {
 	PublishDetails *PublishDetails `json:"publishDetails"`
 
 	// Seller is the pubkey address of the seller of the nft
+	// DEPRECATED
 	Seller string `json:"seller"`
 
 	// SaleTime is the time in which the sale occurred

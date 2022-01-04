@@ -97,7 +97,7 @@ func (s *Service) validate() error {
 	return nil
 }
 
-// Create the sales record
+// Create will create the sales record in the db.
 func (s *Service) Create(rec sales.Record) (*sales.Record, error) {
 	logger := s.logger.With(zap.String("salesId", rec.ID))
 
@@ -115,6 +115,8 @@ func (s *Service) Create(rec sales.Record) (*sales.Record, error) {
 	return &rec, nil
 }
 
+// SaveNewSales queries a royalty address and saves new sale records if they
+// txn sigs come from the supported marketplace sales.
 func (s *Service) SaveNewSales(royaltyAddress string) error {
 	logger := s.logger.With(zap.String("royaltyAddress", royaltyAddress))
 
@@ -125,31 +127,17 @@ func (s *Service) SaveNewSales(royaltyAddress string) error {
 		return fmt.Errorf(msg+": %w", err)
 	}
 
-	var until solana.Signature
-	res, err := s.reader.List(reader.Condition{
-		OrderBy:       "saleTime",
-		SortDirection: "ASC",
-		Limit:         1,
-	})
-	switch err {
-	case nil:
-		until, err = solana.SignatureFromBase58(res[0].ID)
-		if err != nil {
-			const msg = "unable to form signature from id"
-			logger.Error(msg, zap.Error(err))
-			return fmt.Errorf(msg+": %w", err)
-		}
-	case sales.ErrNotFound:
-	default:
-		const msg = "unable to list oldest sale"
+	until, err := s.getOldestSaleSignature(logger)
+	if err != nil {
+		const msg = "unable to get oldest sale signature"
 		logger.Error(msg, zap.Error(err))
 		return fmt.Errorf(msg+": %w", err)
 	}
 
+	// arbitrary limit of 50 arrived from the various testing
 	limit := 50
 	var (
 		done     bool
-		backfill bool
 		newSales int
 		before   solana.Signature
 	)
@@ -162,7 +150,7 @@ findNewSales:
 	for !done {
 		opts := rpc.GetSignaturesForAddressOpts{
 			Before: before,
-			Until:  until,
+			Until:  *until,
 			Limit:  &limit,
 		}
 		signatures, err := s.solClient.GetSignaturesForAddressWithOpts(context.Background(), pk, &opts)
@@ -179,49 +167,30 @@ findNewSales:
 		}
 
 		// if we find a transaction that is already in our db, we are done.
-		// otherwise, we keep filling up our new sales list until we hit a max
-		// of 500 sales. At which we flush the list to the db and start again
 		for i := range signatures {
 			logger := logger.With(zap.String("signature", signatures[i].Signature.String()))
 			logger.Debug("processing signature")
 			// check if the signature already exists in our db
-			_, err := s.reader.Get(signatures[i].Signature.String())
-			switch err {
-			case nil:
-				// could be caught up, set a before time
-				logger.Debug("found existing sales record, done searching")
-				break findNewSales
-			case sales.ErrNotFound:
-				backfill = false
-			default:
-				const msg = "unable to get sale record"
+			caughtUp, err := s.isCaughtUp(logger, signatures[i].Signature.String())
+			if err != nil {
+				const msg = "unable to determine if sales are caught up"
 				logger.Error(msg, zap.Error(err))
 				return fmt.Errorf(msg+": %w", err)
 			}
 
+			if caughtUp {
+				break findNewSales
+			}
+
 			// get the signature transaction to ensure it was a marketplace
 			// sale
-			tx := new(rpc.GetTransactionResult)
-			if err := s.retryRPC(func() error {
-				tx, err = s.solClient.GetTransaction(context.Background(), signatures[i].Signature, nil)
-				if err != nil {
-					const msg = "unable to get transaction"
-					logger.Error(msg, zap.Error(err), zap.String("signature", signatures[i].Signature.String()))
-					return fmt.Errorf(msg+": %w", err)
-				}
-
-				return nil
-			}, 3, time.Second*45); err != nil {
-				fmt.Errorf("unable to get transaction: %w", err)
+			tx, err := s.getTransaction(logger, signatures[i].Signature)
+			if err != nil {
+				const msg = "unable to get transaction"
+				logger.Error(msg, zap.Error(err))
+				return fmt.Errorf(msg+": %w", err)
 			}
-
-			if tx.Meta == nil {
-				logger.Warn("transaction does not have meta data")
-				continue
-			}
-
-			if tx.Meta.Err != nil {
-				logger.Warn("transaction has error")
+			if tx == nil {
 				continue
 			}
 
@@ -232,77 +201,29 @@ findNewSales:
 			}
 
 			// we found a marketplace sale, get the metadata and add to the list
-			mint := tx.Meta.PostTokenBalances[0].Mint
-			var pda solana.PublicKey
-			s.retryRPC(func() error {
-				pda, _, err = solana.FindTokenMetadataAddress(mint)
-				if err != nil {
-					const msg = "unable to get token metadata address"
-					logger.Error(msg, zap.Error(err))
-					return fmt.Errorf(msg+": %w", err)
-				}
-
-				return nil
-			}, 3, time.Second*45)
-
-			out := new(rpc.GetAccountInfoResult)
-			s.retryRPC(func() error {
-				out, err = s.solClient.GetAccountInfo(context.Background(), pda)
-				if err != nil {
-					const msg = "unable to get account info for pda"
-					logger.Error(msg, zap.Error(err))
-					return fmt.Errorf(msg+": %w", err)
-				}
-				return nil
-			}, 3, time.Second*45)
-
-			var meta token_metadata.Metadata
-
-			dec := bin.NewBorshDecoder(out.Value.Data.GetBinary())
-			if err := dec.Decode(&meta); err != nil {
-				const msg = "unable to decode metadata"
+			meta, err := s.getTokenMetadata(logger, tx.Meta.PostTokenBalances[0].Mint)
+			if err != nil {
+				const msg = "unable to get token metadata"
 				logger.Error(msg, zap.Error(err))
 				return fmt.Errorf(msg+": %w", err)
 			}
 
-			saleTime := signatures[i].BlockTime.Time().UTC()
-			sale := sales.Record{
-				ID:          signatures[i].Signature.String(),
-				Collection:  badBromotoesAlphaArtCollectionID,
-				Marketplace: m,
-				MintPubkey:  mint.String(),
-				Price:       getPrice(tx.Meta.PreBalances[0], tx.Meta.PostBalances[0]),
-				SaleTime:    &saleTime,
-				NFT: sales.NFT{
-					Name:        strings.Replace(meta.Data.Name, "\u0000", "", -1),
-					Symbol:      strings.Replace(meta.Data.Symbol, "\u0000", "", -1),
-					MetadataURI: strings.Replace(meta.Data.Uri, "\u0000", "", -1),
-				},
-			}
-			//sale.Buyer = findBuyer(keys, tx.Meta, m)
-			//sale.Seller = findSeller(keys, tx.Meta, m)
-
-			// if the price is < .09 sol and the marketplace is solsea,
-			// its prob not a sale and just something else.
-			if sale.Price < 90000000 && sale.Marketplace == "Solsea" {
-				continue
-			}
-
-			// we found a new sale
-			logger.Debug("new sale found", zap.String("salesId", sale.ID), zap.Int("numNewSales", newSales), zap.Time("saleTime", saleTime))
-			if _, err := s.Create(sale); err != nil {
+			if err := s.createSalesRecord(
+				logger,
+				signatures[i],
+				tx,
+				meta,
+				m); err != nil {
 				const msg = "unable to create sales record"
 				logger.Error(msg, zap.Error(err))
 				return fmt.Errorf(msg+": %w", err)
 			}
-			newSales++
+
 			time.Sleep(time.Millisecond * 250)
 		}
 
 		// set before time to the oldest sale we have
-		if !backfill {
-			before = signatures[len(signatures)-1].Signature
-		}
+		before = signatures[len(signatures)-1].Signature
 		logger.Debug("before time set", zap.Time("before", signatures[len(signatures)-1].BlockTime.Time()), zap.String("signature", signatures[len(signatures)-1].Signature.String()))
 		logger.Debug("new sales so far", zap.Int("numSales", newSales))
 
@@ -315,119 +236,37 @@ findNewSales:
 	return nil
 }
 
-func (s *Service) PublishNewSales() error {
-	oldestRes, err := s.reader.List(reader.Condition{
-		Wheres: []reader.Where{
-			{
-				Field:    "publishDetails",
-				Operator: "IS NULL",
-			},
-			{
-				Field:    "saleTime",
-				Operator: ">=",
-				Value:    "2021-12-01T00:00:00Z",
-			},
-		},
-		OrderBy:       "saleTime",
-		SortDirection: "ASC",
-		Limit:         1,
-	})
-
+// PublishNewSales finds the oldest sale that has yet to be published and
+// publishes it to Twitter. The metadata such as the image is retrieved at
+// runtime.
+func (s *Service) PublishNewSales(skipPublish bool) error {
+	oldest, err := s.getOldestNonPublished()
 	switch err {
 	case nil:
 	case sales.ErrNotFound:
-		s.logger.Debug("no sales to publish")
 		return nil
 	default:
-		const msg = "unable to get oldest sale"
-		s.logger.Error(msg, zap.Error(err))
-		return fmt.Errorf(msg+": %w", err)
+		return err
 	}
 
-	oldest := oldestRes[0]
 	logger := s.logger.With(zap.String("saleId", oldest.ID))
-
 	logger.Debug("publishing oldest non-published sale")
 
-	mediaID := oldest.TwitterMediaID
-	if mediaID == "" {
-		// get metadata
-		c := new(http.Client)
+	mediaID, err := s.processMetadataImage(logger, oldest)
+	if err != nil {
+		const msg = "unable to process metadata image"
+		logger.Error(msg, zap.Error(err))
+		return fmt.Errorf(msg+": %w", err)
+	}
+	oldest.TwitterMediaID = mediaID
 
-		req, err := http.NewRequest(http.MethodGet, oldest.NFT.MetadataURI, nil)
-		if err != nil {
-			const msg = "unable to create metadata request"
-			logger.Error(msg, zap.Error(err))
-			return fmt.Errorf(msg+": %w", err)
-		}
-
-		resp, err := c.Do(req)
-		if err != nil {
-			const msg = "unable to get metadata"
-			logger.Error(msg, zap.Error(err))
-			return fmt.Errorf(msg+": %w", err)
-		}
-
-		var m map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
-			const msg = "unable to decode metadata"
-			logger.Error(msg, zap.Error(err))
-			return fmt.Errorf(msg+": %w", err)
-		}
-		resp.Body.Close()
-
-		imageURI, ok := m["image"].(string)
-		if !ok {
-			const msg = "unable to find image uri from metadata"
-			logger.Error(msg)
-			return errors.New(msg)
-		}
-
-		// attempt to get the extension
-		imageExt := "png"
-		imageParts := strings.Split(imageURI, "?ext=")
-		if len(imageParts) > 1 {
-			imageExt = imageParts[1]
-		}
-
-		logger.Debug("image uri", zap.String("uri", imageURI))
-		// download image
-		req, err = http.NewRequest(http.MethodGet, imageURI, nil)
-		if err != nil {
-			const msg = "unable to create download image request"
-			logger.Error(msg, zap.Error(err))
-			return fmt.Errorf(msg+": %w", err)
-		}
-
-		resp, err = c.Do(req)
-		if err != nil {
-			const msg = "unable to download image"
-			logger.Error(msg, zap.Error(err))
-			return fmt.Errorf(msg+": %w", err)
-		}
-
-		// can chunk this when twitter api is there
-		image, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			const msg = "unable to read image body"
-			logger.Error(msg, zap.Error(err))
-			return fmt.Errorf(msg+": %w", err)
-		}
-		resp.Body.Close()
-
-		logger.Debug("image size", zap.Int("size", len(image)))
-		mediaID, err = s.uploadImageTwitter(logger, imageExt, image)
-		if err != nil {
-			const msg = "unable to upload image to twitter"
-			logger.Error(msg, zap.Error(err))
-			return fmt.Errorf(msg+": %w", err)
-		}
-
-		oldest.TwitterMediaID = mediaID
+	if skipPublish {
+		logger.Debug("skipping publish")
+		return nil
 	}
 
 	success := true
-	id, err := s.publishSaleTweet(logger, oldest)
+	id, err := s.publishSaleTweet(logger, *oldest)
 	if err != nil {
 		const msg = "unable to publish sales tweet"
 		logger.Error(msg, zap.Error(err))
@@ -461,28 +300,264 @@ func (s *Service) PublishNewSales() error {
 	return nil
 }
 
-type Post struct {
-	Text  string `json:"text"`
-	Media Media  `json:"media"`
+func (s *Service) createSalesRecord(
+	logger *zap.Logger,
+	rpcSig *rpc.TransactionSignature,
+	tx *rpc.GetTransactionResult,
+	meta *token_metadata.Metadata,
+	marketplace string) error {
+	saleTime := rpcSig.BlockTime.Time().UTC()
+	sale := sales.Record{
+		ID:          rpcSig.Signature.String(),
+		Collection:  badBromotoesAlphaArtCollectionID,
+		Marketplace: marketplace,
+		MintPubkey:  tx.Meta.PostTokenBalances[0].Mint.String(),
+		Price:       getPrice(tx.Meta.PreBalances[0], tx.Meta.PostBalances[0]),
+		SaleTime:    &saleTime,
+		NFT: sales.NFT{
+			// remove padding done by metaplex
+			Name:        strings.Replace(meta.Data.Name, "\u0000", "", -1),
+			Symbol:      strings.Replace(meta.Data.Symbol, "\u0000", "", -1),
+			MetadataURI: strings.Replace(meta.Data.Uri, "\u0000", "", -1),
+		},
+	}
+
+	// if the price is < .05 sol and the marketplace is solsea,
+	// its prob not a sale and just something else like a listing.
+	// TODO: find a better way to do this
+	if sale.Price < 50000000 && sale.Marketplace == "Solsea" {
+		logger.Debug("price under accepted amount, skipping", zap.Uint("price", uint(sale.Price)))
+		return nil
+	}
+
+	// we found a new sale
+	if _, err := s.Create(sale); err != nil {
+		const msg = "unable to create sales record"
+		logger.Error(msg, zap.Error(err))
+		return fmt.Errorf(msg+": %w", err)
+	}
+
+	logger.Debug("created sale", zap.String("id", sale.ID))
+
+	return nil
 }
 
-type Media struct {
-	MediaIds []string `json:"media_ids"`
+// isCaughtUp returns true if the sale given is already inside the db
+func (s *Service) isCaughtUp(logger *zap.Logger, signature string) (bool, error) {
+	_, err := s.reader.Get(signature)
+	switch err {
+	case nil:
+		logger.Debug("found existing sales record")
+		return true, nil
+	case sales.ErrNotFound:
+		return false, nil
+	default:
+		const msg = "unable to get sale record"
+		logger.Error(msg, zap.Error(err))
+		return false, fmt.Errorf(msg+": %w", err)
+	}
 }
 
-type TweetResp struct {
-	TweetData TweetData `json:"data"`
+func (s *Service) processMetadataImage(logger *zap.Logger, record *sales.Record) (string, error) {
+	imageURI, err := s.getImageURI(logger, record)
+	if err != nil {
+		const msg = "unable to get image URI"
+		logger.Error(msg, zap.Error(err))
+		return "", fmt.Errorf(msg+": %w", err)
+	}
+
+	// attempt to get the extension
+	imageExt := "png"
+	imageParts := strings.Split(imageURI, "?ext=")
+	if len(imageParts) > 1 {
+		imageExt = imageParts[1]
+	}
+
+	logger.Debug("image uri", zap.String("uri", imageURI))
+
+	// download image
+	image, err := s.downloadImage(logger, imageURI)
+	if err != nil {
+		const msg = "unable to download image"
+		logger.Error(msg, zap.Error(err))
+		return "", fmt.Errorf(msg+": %w", err)
+	}
+
+	// upload image
+	mediaID, err := s.uploadImageTwitter(logger, imageExt, image)
+	if err != nil {
+		const msg = "unable to upload image to twitter"
+		logger.Error(msg, zap.Error(err))
+		return "", fmt.Errorf(msg+": %w", err)
+	}
+
+	return mediaID, nil
 }
 
-type TweetData struct {
-	ID string `json:"id"`
+func (s *Service) getImageURI(logger *zap.Logger, record *sales.Record) (string, error) {
+	// get metadata
+	c := new(http.Client)
+
+	req, err := http.NewRequest(http.MethodGet, record.NFT.MetadataURI, nil)
+	if err != nil {
+		const msg = "unable to create metadata request"
+		logger.Error(msg, zap.Error(err))
+		return "", fmt.Errorf(msg+": %w", err)
+	}
+
+	resp, err := c.Do(req)
+	if err != nil {
+		const msg = "unable to get metadata"
+		logger.Error(msg, zap.Error(err))
+		return "", fmt.Errorf(msg+": %w", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+		const msg = "unable to decode metadata"
+		logger.Error(msg, zap.Error(err))
+		return "", fmt.Errorf(msg+": %w", err)
+	}
+	resp.Body.Close()
+
+	imageURI, ok := m["image"].(string)
+	if !ok {
+		const msg = "unable to find image uri from metadata"
+		logger.Error(msg)
+		return "", errors.New(msg)
+	}
+
+	return imageURI, nil
+}
+
+func (s *Service) downloadImage(logger *zap.Logger, imageURI string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, imageURI, nil)
+	if err != nil {
+		const msg = "unable to create download image request"
+		logger.Error(msg, zap.Error(err))
+		return nil, fmt.Errorf(msg+": %w", err)
+	}
+
+	c := new(http.Client)
+
+	resp, err := c.Do(req)
+	if err != nil {
+		const msg = "unable to download image"
+		logger.Error(msg, zap.Error(err))
+		return nil, fmt.Errorf(msg+": %w", err)
+	}
+
+	// can't stream this to twitter directly from the body becuz twitter
+	// needs to know the total bytes before starting :)))))
+	image, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		const msg = "unable to read image body"
+		logger.Error(msg, zap.Error(err))
+		return nil, fmt.Errorf(msg+": %w", err)
+	}
+	resp.Body.Close()
+
+	return image, nil
+}
+
+func (s *Service) getTokenMetadata(logger *zap.Logger, mint solana.PublicKey) (*token_metadata.Metadata, error) {
+	// we found a marketplace sale, get the metadata and add to the list
+	//mint := tx.Meta.PostTokenBalances[0].Mint
+	var pda solana.PublicKey
+	var err error
+	s.retryRPC(func() error {
+		pda, _, err = solana.FindTokenMetadataAddress(mint)
+		if err != nil {
+			const msg = "unable to get token metadata address"
+			logger.Error(msg, zap.Error(err))
+			return fmt.Errorf(msg+": %w", err)
+		}
+
+		return nil
+	}, 3, time.Second*45)
+
+	out := new(rpc.GetAccountInfoResult)
+	s.retryRPC(func() error {
+		out, err = s.solClient.GetAccountInfo(context.Background(), pda)
+		if err != nil {
+			const msg = "unable to get account info for pda"
+			logger.Error(msg, zap.Error(err))
+			return fmt.Errorf(msg+": %w", err)
+		}
+		return nil
+	}, 3, time.Second*45)
+
+	var meta token_metadata.Metadata
+
+	dec := bin.NewBorshDecoder(out.Value.Data.GetBinary())
+	if err := dec.Decode(&meta); err != nil {
+		const msg = "unable to decode metadata"
+		logger.Error(msg, zap.Error(err))
+		return nil, fmt.Errorf(msg+": %w", err)
+	}
+
+	return &meta, nil
+}
+
+func (s *Service) getOldestSaleSignature(logger *zap.Logger) (*solana.Signature, error) {
+	var until solana.Signature
+
+	res, err := s.reader.List(reader.Condition{
+		OrderBy:       "saleTime",
+		SortDirection: "ASC",
+		Limit:         1,
+	})
+	switch err {
+	case nil:
+		until, err = solana.SignatureFromBase58(res[0].ID)
+		if err != nil {
+			const msg = "unable to form signature from id"
+			logger.Error(msg, zap.Error(err))
+			return nil, fmt.Errorf(msg+": %w", err)
+		}
+	case sales.ErrNotFound:
+	default:
+		const msg = "unable to list oldest sale"
+		logger.Error(msg, zap.Error(err))
+		return nil, fmt.Errorf(msg+": %w", err)
+	}
+
+	return &until, nil
+}
+
+func (s *Service) getTransaction(logger *zap.Logger, sig solana.Signature) (*rpc.GetTransactionResult, error) {
+	tx := new(rpc.GetTransactionResult)
+	var err error
+	if err := s.retryRPC(func() error {
+		tx, err = s.solClient.GetTransaction(context.Background(), sig, nil)
+		if err != nil {
+			const msg = "unable to get transaction"
+			logger.Error(msg, zap.Error(err), zap.String("signature", sig.String()))
+			return fmt.Errorf(msg+": %w", err)
+		}
+
+		return nil
+	}, 3, time.Second*45); err != nil {
+		fmt.Errorf("unable to get transaction: %w", err)
+	}
+
+	if tx.Meta == nil {
+		logger.Warn("transaction does not have meta data")
+		return nil, nil
+	}
+
+	if tx.Meta.Err != nil {
+		logger.Warn("transaction has error")
+		return nil, nil
+	}
+
+	return tx, nil
 }
 
 func (s *Service) publishSaleTweet(logger *zap.Logger, rec sales.Record) (string, error) {
 	path := "https://api.twitter.com/2/tweets"
 	saleText := "New Bromato Sale!\n" + "Name: " + rec.NFT.Name + "\n"
 
-	// dont see the price on the transaction
 	price := toSolPriceStr(rec.Price)
 	if price != "" {
 		saleText += "Price: " + toSolPriceStr(rec.Price) + " SOL\n"
@@ -563,19 +638,6 @@ func (s *Service) publishSaleTweet(logger *zap.Logger, rec sales.Record) (string
 			}
 			str := string(b)
 			logger.Error("msg body", zap.String("body", str))
-			//if strings.Contains(str, "Your media IDs are invalid") {
-			//	updates := []writer.Update{
-			//		{
-			//			Field: "twitterMediaId",
-			//			Value: "",
-			//		},
-			//	}
-			//	if err := s.writer.UpdateFields(oldest.ID, updates...); err != nil {
-			//		const msg = "unable to update fields to reflect twitter media id"
-			//		logger.Error(msg, zap.Error(err))
-			//		return fmt.Errorf(msg+": %w", err)
-			//	}
-			//}
 		}
 		const msg = "received non 200 response"
 		logger.Error(msg, zap.Error(err), zap.Int("statusCode", resp.StatusCode))
@@ -607,24 +669,55 @@ func (s *Service) uploadImageTwitter(logger *zap.Logger, ext string, image []byt
 		logger.Error(msg, zap.Error(err))
 		return "", fmt.Errorf(msg+": %w", err)
 	}
+	mediaID, err := s.uploadImageInit(logger, c, uploadURL, len(image), ext)
+	if err != nil {
+		const msg = "unable to upload limit INIT"
+		logger.Error(msg, zap.Error(err))
+		return "", fmt.Errorf(msg+": %w", err)
+	}
+
+	logger.Debug("upload init start", zap.String("mediaId", mediaID))
+
+	// upload image data using APPEND
+	if err := s.uploadImageAppend(logger, c, uploadURL, image, mediaID); err != nil {
+		const msg = "unable to upload image APPEND"
+		logger.Error(msg, zap.Error(err))
+		return "", fmt.Errorf(msg+": %w", err)
+	}
+	logger.Debug("uploaded image", zap.String("mediaId", mediaID))
+
+	// finalize upload
+	if err := s.uploadImageFinalize(logger, c, uploadURL, mediaID); err != nil {
+		const msg = "unable to upload image FINALIZE"
+		logger.Error(msg, zap.Error(err))
+		return "", fmt.Errorf(msg+": %w", err)
+	}
+
+	return mediaID, nil
+}
+
+// TODO: can prob put these methods in a twitter service but eh, time..
+func (s *Service) uploadImageInit(
+	logger *zap.Logger,
+	c *http.Client,
+	uploadURL *url.URL,
+	totalBytes int,
+	ext string) (string, error) {
 	q := uploadURL.Query()
 	q.Set("command", "INIT")
 	q.Set("media_type", "image/"+ext)
 	q.Set("media_category", "tweet_image")
-	q.Set("total_bytes", strconv.Itoa(len(image)))
+	q.Set("total_bytes", strconv.Itoa(totalBytes))
 	uploadURL.RawQuery = q.Encode()
 
-	// create request
+	// create request for INIT upload
 	req, err := http.NewRequest(http.MethodPost, uploadURL.String(), nil)
 	if err != nil {
 		const msg = "unable to create upload image request"
 		logger.Error(msg, zap.Error(err))
 		return "", fmt.Errorf(msg+": %w", err)
 	}
-	// set auth
-	//req.Header.Set("Authorization", "Bearer "+s.twitterToken)
 
-	// send request
 	resp, err := c.Do(req)
 	if err != nil {
 		const msg = "unable to upload image"
@@ -645,7 +738,6 @@ func (s *Service) uploadImageTwitter(logger *zap.Logger, ext string, image []byt
 		return "", errors.New(msg)
 	}
 
-	// decode response
 	var r struct {
 		MediaID string `json:"media_id_string"`
 	}
@@ -656,12 +748,18 @@ func (s *Service) uploadImageTwitter(logger *zap.Logger, ext string, image []byt
 	}
 	resp.Body.Close()
 
-	logger.Debug("upload init start", zap.String("mediaId", r.MediaID))
+	return r.MediaID, nil
+}
 
-	q = make(url.Values)
+func (s *Service) uploadImageAppend(
+	logger *zap.Logger,
+	c *http.Client,
+	uploadURL *url.URL,
+	image []byte,
+	mediaID string) error {
+	q := make(url.Values)
 	q.Set("command", "APPEND")
-	q.Set("media_id", r.MediaID)
-
+	q.Set("media_id", mediaID)
 	var i int
 	for len(image) > 0 {
 		chunk := image[:min(len(image), maxChunkSizeInBytes)]
@@ -672,25 +770,25 @@ func (s *Service) uploadImageTwitter(logger *zap.Logger, ext string, image []byt
 		if err != nil {
 			const msg = "unable to create form file"
 			logger.Error(msg, zap.Error(err))
-			return "", fmt.Errorf(msg+": %w", err)
+			return fmt.Errorf(msg+": %w", err)
 		}
 		if _, err := io.Copy(part, bytes.NewReader(chunk)); err != nil {
 			const msg = "unable to copy"
 			logger.Error(msg, zap.Error(err))
-			return "", fmt.Errorf(msg+": %w", err)
+			return fmt.Errorf(msg+": %w", err)
 		}
 		writer.Close()
 
 		q.Set("segment_index", strconv.Itoa(i))
 		uploadURL.RawQuery = q.Encode()
 
-		req, err = http.NewRequest(http.MethodPost, uploadURL.String(), buf)
+		req, err := http.NewRequest(http.MethodPost, uploadURL.String(), buf)
 		if err != nil {
 			const msg = "unable to append image request"
 			logger.Error(msg, zap.Error(err))
-			return "", fmt.Errorf(msg+": %w", err)
+			return fmt.Errorf(msg+": %w", err)
 		}
-		//req.Header.Set("Authorization", "Bearer "+s.twitterToken)
+
 		req.Header.Add("Content-Type", writer.FormDataContentType())
 		req.Header.Set("Content-Length", strconv.Itoa(len(chunk)))
 
@@ -698,57 +796,123 @@ func (s *Service) uploadImageTwitter(logger *zap.Logger, ext string, image []byt
 		if err != nil {
 			const msg = "unable to append image"
 			logger.Error(msg, zap.Error(err))
-			return "", fmt.Errorf(msg+": %w", err)
+			return fmt.Errorf(msg+": %w", err)
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			const msg = "recieved non-200 response from twitter"
+			const msg = "received non-200 response from twitter"
 			logger.Error(msg, zap.Int("status", resp.StatusCode))
 			if resp.Body != nil {
 				body, err := ioutil.ReadAll(resp.Body)
 				if err != nil {
-					return "", fmt.Errorf("unable to read body: %w", err)
+					return fmt.Errorf("unable to read body: %w", err)
 				}
 				logger.Error("body", zap.String("body", string(body)))
 			}
-			return "", fmt.Errorf(msg+": %d", resp.StatusCode)
+			return fmt.Errorf(msg+": %d", resp.StatusCode)
 		}
 		i++
 		image = image[min(len(image), maxChunkSizeInBytes):]
 	}
-	logger.Debug("uploaded image", zap.String("mediaId", r.MediaID))
 
-	// create request to finalize upload
-	q = make(url.Values)
+	return nil
+}
+
+func (s *Service) uploadImageFinalize(
+	logger *zap.Logger,
+	c *http.Client,
+	uploadURL *url.URL,
+	mediaID string) error {
+	q := make(url.Values)
 	q.Set("command", "FINALIZE")
-	q.Set("media_id", r.MediaID)
+	q.Set("media_id", mediaID)
 	uploadURL.RawQuery = q.Encode()
-	req, err = http.NewRequest(http.MethodPost, uploadURL.String(), nil)
+	req, err := http.NewRequest(http.MethodPost, uploadURL.String(), nil)
 	if err != nil {
 		const msg = "unable to create finalize image upload request"
 		logger.Error(msg, zap.Error(err))
-		return "", fmt.Errorf(msg+": %w", err)
+		return fmt.Errorf(msg+": %w", err)
 	}
 
-	resp, err = c.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("unable to finalize image upload: %w", err)
+		return fmt.Errorf("unable to finalize image upload: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if resp.Body != nil {
 			body, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
-				return "", fmt.Errorf("unable to read body: %w", err)
+				return fmt.Errorf("unable to read body: %w", err)
 			}
 			logger.Error("body", zap.String("body", string(body)))
 		}
-		const msg = "recieved non-200 response from twitter"
+		const msg = "received non-200 response from twitter"
 		logger.Error(msg, zap.Int("status", resp.StatusCode))
-		return "", fmt.Errorf(msg+": %d", resp.StatusCode)
+		return fmt.Errorf(msg+": %d", resp.StatusCode)
 	}
 
-	return r.MediaID, nil
+	return nil
+}
+
+func (s *Service) getOldestNonPublished() (*sales.Record, error) {
+	oldestRes, err := s.reader.List(reader.Condition{
+		Wheres: []reader.Where{
+			{
+				Field:    "publishDetails",
+				Operator: "IS NULL",
+			},
+			{
+				Field:    "saleTime",
+				Operator: ">=",
+				Value:    "2021-12-01T00:00:00Z",
+			},
+		},
+		OrderBy:       "saleTime",
+		SortDirection: "ASC",
+		Limit:         1,
+	})
+
+	switch err {
+	case nil:
+	case sales.ErrNotFound:
+		s.logger.Debug("no sales to publish")
+		return nil, sales.ErrNotFound
+	default:
+		const msg = "unable to get oldest sale"
+		s.logger.Error(msg, zap.Error(err))
+		return nil, fmt.Errorf(msg+": %w", err)
+	}
+
+	return &oldestRes[0], nil
+}
+
+func (s *Service) recordPublishing(logger *zap.Logger, record *sales.Record, id string, success bool) error {
+	now := time.Now().UTC()
+	publishDetails := sales.PublishDetails{
+		ID:      id,
+		Channel: sales.Twitter,
+		Time:    &now,
+		Success: success,
+	}
+
+	updates := []writer.Update{
+		{
+			Field: "twitterMediaId",
+			Value: record.TwitterMediaID,
+		},
+		{
+			Field: "publishDetails",
+			Value: &publishDetails,
+		},
+	}
+	if err := s.writer.UpdateFields(record.ID, updates...); err != nil {
+		const msg = "unable to update fields to reflect twitter media id"
+		logger.Error(msg, zap.Error(err))
+		return fmt.Errorf(msg+": %w", err)
+	}
+
+	return nil
 }
 
 type Credentials struct {
@@ -811,72 +975,13 @@ func (s *Service) retryRPC(do func() error, retries int, timeout time.Duration) 
 				}
 				s.logger.Debug("rate limited, sleeping...")
 				retry++
+				// solana rpc API rate limit resets every 10
 				time.Sleep(time.Second * 10)
 			}
 		}
 	}
 
 	return errors.New("error exceeded retries")
-}
-
-func findBuyer(accounts []solana.PublicKey, meta *rpc.TransactionMeta, marketplace string) string {
-	switch marketplace {
-	case "Magic Eden", "Digital Eyes", "Alpha Art":
-		if len(accounts) > 0 {
-			return accounts[0].String()
-		}
-		return ""
-	case "Solsea":
-	default:
-		return ""
-	}
-
-	if len(meta.PreBalances) == 0 || len(meta.PostBalances) == 0 {
-		return ""
-	}
-
-	// find one with all zeros
-	for i := range meta.PreBalances {
-		if meta.PreBalances[i] == 0 && meta.PostBalances[i] == 0 {
-			return accounts[i].String()
-		}
-	}
-
-	return ""
-}
-
-func findSeller(accounts []solana.PublicKey, meta *rpc.TransactionMeta, marketplace string) string {
-	switch marketplace {
-	case "Solsea":
-		return accounts[0].String()
-	}
-
-	if len(meta.PreBalances) == 0 || len(meta.PostBalances) == 0 {
-		return ""
-	}
-
-	// assume first balance change is that of the signer aka the buyer
-	if meta.PreBalances[0] < meta.PostBalances[0] {
-		return ""
-	}
-
-	amountWithFees := meta.PreBalances[0] - meta.PostBalances[0]
-
-	// find a balance difference in which the post > pre and the amount is
-	// roughly within 20% sol to account for fees
-	within := (amountWithFees / 100) * 20
-
-	for i := range meta.PreBalances {
-		if meta.PostBalances[i] < meta.PreBalances[i] {
-			continue
-		}
-		diff := amountWithFees - (meta.PostBalances[i] - meta.PreBalances[i])
-		if diff <= within && len(accounts) > i {
-			return accounts[i].String()
-		}
-	}
-
-	return ""
 }
 
 func getPrice(pre, post uint64) uint64 {
@@ -930,12 +1035,4 @@ func min(i, j int) int {
 	}
 
 	return j
-}
-
-func na(str string) string {
-	if str == "" {
-		return "NA"
-	}
-
-	return str
 }

@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
@@ -24,12 +22,9 @@ import (
 
 type Config struct {
 	CouchbaseEndpoint string `env:"COUCHBASE_ENDPOINT,required"`
-
 	CouchbaseUsername string `env:"COUCHBASE_USERNAME,required"`
-
 	CouchbasePassword string `env:"COUCHBASE_PASSWORD,required"`
-
-	CouchbaseBucket string `env:"COUCHBASE_BUCKET,required"`
+	CouchbaseBucket   string `env:"COUCHBASE_BUCKET,required"`
 }
 
 func main() {
@@ -110,7 +105,7 @@ func run(ctx context.Context, logger *zap.Logger, svc *service.Service) error {
 		for {
 			select {
 			case <-ticker.C:
-				if err := svc.PublishNewSales(); err != nil {
+				if err := svc.PublishNewSales(false); err != nil {
 					logger.Error("unable to publish new sales")
 				}
 			}
@@ -153,31 +148,17 @@ func getService(logger *zap.Logger, cluster *gocb.Cluster, bucket string) (*serv
 }
 
 func getCluster(cfg *Config) (*gocb.Cluster, error) {
-	b, err := ioutil.ReadFile("trialcert.cer")
-	if err != nil {
-		return nil, fmt.Errorf("unable to get cluster: %w", err)
-	}
-
-	rootCAs, _ := x509.SystemCertPool()
-	if rootCAs == nil {
-		rootCAs = x509.NewCertPool()
-	}
-
-	if ok := rootCAs.AppendCertsFromPEM(b); !ok {
-		return nil, fmt.Errorf("unable to append certs to pool: %w", err)
-	}
-
 	c, err := gocb.Connect(
-		"couchbases://"+cfg.CouchbaseEndpoint+"?ssl=no_verify",
+		"couchbase://"+cfg.CouchbaseEndpoint+"?ssl=no_verify",
 		gocb.ClusterOptions{
 			Username: cfg.CouchbaseUsername,
 			Password: cfg.CouchbasePassword,
-			SecurityConfig: gocb.SecurityConfig{
-				TLSRootCAs:    rootCAs,
-				TLSSkipVerify: true,
-			},
 		},
 	)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get cluster connection: %w", err)
+	}
+
 	if err := c.WaitUntilReady(time.Second*5, nil); err != nil {
 		return nil, fmt.Errorf("unable to wait until cluster ready: %w", err)
 	}

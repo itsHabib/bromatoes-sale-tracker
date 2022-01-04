@@ -155,7 +155,7 @@ func (s *Service) UpdateFields(id string, updates ...Update) error {
 		return fmt.Errorf(msg+": %w", err)
 	}
 
-	logger.Debug("successfully created sales record")
+	logger.Debug("successfully updated sales record")
 
 	return nil
 }

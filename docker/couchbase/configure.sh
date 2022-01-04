@@ -53,10 +53,11 @@ if ! couchbase-cli server-list -c localhost:8091 -u Administrator -p password >/
     --bucket 'local' \
     --create-collection 'nfts.sales'
 
-fi
+  echo "pausing for services to come up..."
+  sleep 15
 
-until cbq -u Administrator -p password -s="CREATE PRIMARY INDEX ON \`local\`.nfts.sales;" > /dev/null; do
-  sleep 5
-done
+  cbq -u Administrator -p password -s="CREATE PRIMARY INDEX ON \`local\`.nfts.sales;"
+  bq -u Administrator -p password -s="CREATE INDEX adv_publishDetails_saleTime ON \`default\`:\`local\`.\`nfts\`.\`sales\`(\`publishDetails\`,\`saleTime\`);"
+fi
 
 fg 1
