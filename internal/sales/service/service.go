@@ -992,7 +992,7 @@ func getPrice(pre, post uint64) uint64 {
 }
 
 func toSolPriceStr(price uint64) string {
-	if price < 100000000 {
+	if price < 40000000 {
 		return ""
 	}
 
