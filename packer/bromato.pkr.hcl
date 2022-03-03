@@ -60,6 +60,12 @@ build {
     source = "configure-cb.sh"
   }
 
+  provisioner "file" {
+    destination = "/tmp/bromato-sales.json"
+    source = "bromato-sales-03-03.json"
+  }
+
+
   provisioner "shell" {
     inline = [
       "sleep 10",
@@ -85,9 +91,8 @@ build {
       "rm /tmp/${var.server_version}.rpm",
       "sudo mv /tmp/configure-cb.sh /home/ec2-user/configure-cb.sh",
       "sudo usermod -a -G couchbase ec2-user",
-      "sudo systemctl disable couchbase-server",
 
-      // enable bromato.service
+      "sudo mv /tmp/bromato-sales.json /home/ec2-user",
       "sudo mv /tmp/bromato.service /lib/systemd/system/bromato.service",
       "sudo mv /tmp/bromato.gz /home/ec2-user",
       "sudo gunzip /home/ec2-user/bromato.gz",

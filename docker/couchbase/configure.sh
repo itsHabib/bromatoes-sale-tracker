@@ -57,7 +57,7 @@ if ! couchbase-cli server-list -c localhost:8091 -u Administrator -p password >/
   sleep 15
 
   cbq -u Administrator -p password -s="CREATE PRIMARY INDEX ON \`local\`.nfts.sales;"
-  bq -u Administrator -p password -s="CREATE INDEX adv_publishDetails_saleTime ON \`default\`:\`local\`.\`nfts\`.\`sales\`(\`publishDetails\`,\`saleTime\`);"
+  cbq -u Administrator -p password -s="CREATE INDEX adv_publishDetails_saleTime ON \`default\`:\`local\`.\`nfts\`.\`sales\`(\`publishDetails\`,\`saleTime\`);"
 fi
 
 fg 1
