@@ -1,6 +1,2 @@
 # Bromato Sales Tracker
-
-TODO: 
-- rewrite in rust for better interop with contracts
-- tests
-
+track sales of bromato NFTs, posts to twitter when seeing a new sale
